@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ACTION="${1:-}" TCP="${2:-}"
+[[ "$TCP" =~ ^[0-9]{1,5}$ ]] && (( TCP >= 1024 && TCP <= 65535 )) || exit 64
+CFG=/etc/darksurf/sshd_config
+[[ -f "$CFG" ]] || { echo 'sshd_config DARK_SURF introuvable' >&2; exit 2; }
+if [[ "$ACTION" == enable ]]; then
+  TMP="$(mktemp)"
+  awk -v p="$TCP" 'BEGIN{done=0} /^Port[[:space:]]+[0-9]+$/ && !done {print "Port " p; done=1; next} {print} END{if(!done) print "Port " p}' "$CFG" >"$TMP"
+  chmod --reference="$CFG" "$TMP"; chown --reference="$CFG" "$TMP"
+  BACKUP="$CFG.bak.$(date +%Y%m%d%H%M%S)"
+  cp -a "$CFG" "$BACKUP"
+  install -m "$(stat -c %a "$CFG")" -o root -g root "$TMP" "$CFG"
+  rm -f "$TMP"
+  if ! /usr/sbin/sshd -t -f "$CFG"; then cp -a "$BACKUP" "$CFG"; exit 3; fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw allow "$TCP/tcp" >/dev/null
+  fi
+  if ! systemctl restart darksurf-sshd || ! systemctl is-active --quiet darksurf-sshd; then
+    cp -a "$BACKUP" "$CFG"
+    systemctl restart darksurf-sshd || true
+    exit 4
+  fi
+elif [[ "$ACTION" == disable ]]; then
+  systemctl stop darksurf-sshd || true
+else
+  exit 64
+fi
+printf 'SSH_CONFIG_APPLIED action=%s tcp=%s\n' "$ACTION" "$TCP"

@@ -1,0 +1,12 @@
+{
+  "name": "darksurf-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend DARK_SURF : API client, gestion WireGuard, portail vendeur",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "admin": "node --disable-warning=ExperimentalWarning src/admin.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  }
+}

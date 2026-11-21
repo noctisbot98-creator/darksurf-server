@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Point d'entrée sudo du panel. Le service du portail est très cloisonné (système en lecture seule) :
+# on confie donc le vrai travail à systemd, qui le lance hors de ce cloisonnement.
+set -euo pipefail
+[[ "${1:-}" =~ ^(enable|disable)$ && "${2:-}" =~ ^(stunnel|dropbear|udpgw)$ && "${3:-}" =~ ^[0-9]{1,5}$ ]] || exit 64
+exec /usr/bin/systemd-run --quiet --wait --collect --pipe /usr/local/sbin/darksurf-modules-run "$1" "$2" "$3"

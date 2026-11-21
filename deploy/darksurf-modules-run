@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Modules SSH supplémentaires, pilotés depuis le panel admin.
+# Usage : darksurf-modules enable|disable stunnel|dropbear|udpgw <port>
+set -euo pipefail
+ACTION="${1:-}" MOD="${2:-}" PORT="${3:-}"
+[[ "$ACTION" =~ ^(enable|disable)$ ]] || exit 64
+[[ "$MOD" =~ ^(stunnel|dropbear|udpgw)$ ]] || exit 64
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1024 && PORT <= 65535 )) || exit 64
+STATE=/etc/darksurf/modules
+mkdir -p "$STATE"
+UNIT="darksurf-$MOD"
+ufw_on() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; }
+export DEBIAN_FRONTEND=noninteractive
+SSHD_PORT="$(awk '/^Port[[:space:]]+[0-9]+$/ {print $2; exit}' /etc/darksurf/sshd_config 2>/dev/null || echo 2222)"
+
+if [ "$ACTION" = disable ]; then
+  OLD="$(cat "$STATE/$MOD.port" 2>/dev/null || echo "$PORT")"
+  systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$UNIT.service" "$STATE/$MOD.port"; systemctl daemon-reload
+  if [ "$MOD" != udpgw ] && ufw_on; then ufw delete allow "$OLD/tcp" >/dev/null 2>&1 || true; fi
+  [ "$MOD" = udpgw ] && /usr/local/sbin/darksurf-ssh-firewall >/dev/null 2>&1 || true
+  printf 'MODULE_APPLIED action=disable module=%s\n' "$MOD"; exit 0
+fi
+
+case "$MOD" in
+  stunnel)
+    apt-get install -y stunnel4 openssl >/dev/null 2>&1 || { echo 'installation de stunnel4 impossible' >&2; exit 5; }
+    [ -s /etc/stunnel/darksurf.pem ] || { openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj '/CN=darksurf' \
+        -keyout /etc/stunnel/darksurf.key -out /etc/stunnel/darksurf.crt >/dev/null 2>&1 && cat /etc/stunnel/darksurf.key /etc/stunnel/darksurf.crt >/etc/stunnel/darksurf.pem && chmod 600 /etc/stunnel/darksurf.pem /etc/stunnel/darksurf.key; }
+    cat >/etc/stunnel/darksurf.conf <<CFG
+foreground = yes
+pid =
+[ssh-tls]
+accept = 0.0.0.0:$PORT
+connect = 127.0.0.1:$SSHD_PORT
+cert = /etc/stunnel/darksurf.pem
+CFG
+    EXEC="/usr/bin/stunnel /etc/stunnel/darksurf.conf" ;;
+  dropbear)
+    apt-get install -y dropbear-bin >/dev/null 2>&1 || { echo 'installation de dropbear impossible' >&2; exit 5; }
+    # Dropbear n'accepte que les comptes dont l'interpréteur figure dans /etc/shells : nos comptes n'ont pas de shell (nologin).
+    grep -qx /usr/sbin/nologin /etc/shells || echo /usr/sbin/nologin >>/etc/shells
+    mkdir -p /etc/dropbear
+    [ -s /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1
+    EXEC="/usr/sbin/dropbear -F -E -w -p $PORT -r /etc/dropbear/dropbear_ed25519_host_key" ;;
+  udpgw)
+    command -v badvpn-udpgw >/dev/null 2>&1 || apt-get install -y badvpn >/dev/null 2>&1 || { echo 'installation de badvpn (udpgw) impossible' >&2; exit 5; }
+    EXEC="$(command -v badvpn-udpgw) --listen-addr 127.0.0.1:$PORT --max-clients 1000 --max-connections-for-client 20" ;;
+esac
+
+cat >"/etc/systemd/system/$UNIT.service" <<UNITF
+[Unit]
+Description=DARK_SURF module $MOD
+After=network-online.target darksurf-sshd.service
+[Service]
+ExecStart=$EXEC
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+UNITF
+echo "$PORT" >"$STATE/$MOD.port"
+systemctl daemon-reload
+if ! systemctl enable --now "$UNIT" >/dev/null 2>&1 || ! systemctl is-active --quiet "$UNIT"; then
+  systemctl disable --now "$UNIT" >/dev/null 2>&1 || true; rm -f "/etc/systemd/system/$UNIT.service" "$STATE/$MOD.port"
+  echo "le module $MOD ne démarre pas" >&2; exit 4
+fi
+if [ "$MOD" != udpgw ] && ufw_on; then ufw allow "$PORT/tcp" >/dev/null; fi
+[ "$MOD" = udpgw ] && /usr/local/sbin/darksurf-ssh-firewall >/dev/null 2>&1 || true
+printf 'MODULE_APPLIED action=enable module=%s port=%s\n' "$MOD" "$PORT"
